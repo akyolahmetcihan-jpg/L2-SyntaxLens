@@ -12,7 +12,6 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Tema & Stil
 st.markdown("""
 <style>
     h1, h2, h3, h4 {
@@ -80,7 +79,6 @@ def load_nlp():
 
 nlp = load_nlp()
 
-# --- VERİ ŞEMALARI (PYDANTIC) ---
 class DiagnosticError(BaseModel):
     category: str
     error_type: str
@@ -96,7 +94,6 @@ class SyntaxDiagnosticReport(BaseModel):
     execution_trace: List[str] = Field(default_factory=list)
     pedagogical_feedback: str = ""
 
-# --- KURAL TABANLI SENTAKTİK VE MORFOLOJİK HATA MOTORU ---
 VERB_PREP_COLLOCATIONS = {
     "depend": "on",
     "rely": "on",
@@ -110,7 +107,7 @@ VERB_PREP_COLLOCATIONS = {
 
 PAST_TIME_ADVERBIALS = ["yesterday", "ago", "last", "formerly", "previously", "in 2020", "in 2021", "in 2022"]
 
-def diagnose_l2_syntax(text: str) -> (SyntaxDiagnosticReport, any, float):
+def diagnose_l2_syntax(text: str):
     start_time = time.perf_counter()
     doc = nlp(text)
     report = SyntaxDiagnosticReport(raw_utterance=text, status="GRAMMATICAL")
@@ -118,16 +115,13 @@ def diagnose_l2_syntax(text: str) -> (SyntaxDiagnosticReport, any, float):
 
     trace.append(f"Segmented and tokenized into {len(doc)} tokens.")
 
-    # 1. Özne-Yüklem Uyuşmazlığı (Subject-Verb Agreement - SVA)
+    # 1. Özne-Yüklem Uyuşmazlığı (Subject-Verb Agreement)
     for token in doc:
         if token.dep_ == "nsubj" and token.head.pos_ in ["VERB", "AUX"]:
             verb = token.head
             trace.append(f"Analyzing dependency relation: nsubj('{token.text}') -> head('{verb.text}')")
-            
-            # Tekil 3. şahıs zamir/isim kontrolü (he, she, it veya tekil isim)
             is_third_person_singular = token.lower_ in ["he", "she", "it"] or (token.tag_ in ["NN", "NNP"] and token.text.lower() not in ["i", "you"])
             
-            # Eğer geniş zaman ve özne 3. tekil şahıs ise, fiil 'VBZ' (-s takısı) almalı
             if is_third_person_singular and verb.tag_ == "VBP":
                 report.diagnostics.append(DiagnosticError(
                     category="Morphosyntactic Agreement",
@@ -138,12 +132,15 @@ def diagnose_l2_syntax(text: str) -> (SyntaxDiagnosticReport, any, float):
                 ))
                 trace.append(f"Violation flagged: SVA clash between '{token.text}' and base present verb '{verb.text}'.")
 
-    # 2. Yanlış Edat Seçimi / Preposition Collocation Errors
+    # 2. Yanlış Edat Seçimi (Preposition Collocation Errors)
     for token in doc:
         if token.pos_ in ["VERB", "ADJ"]:
             lemma = token.lemma_.lower()
             if lemma in VERB_PREP_COLLOCATIONS:
                 expected_prep = VERB_PREP_COLLOCATIONS[lemma]
                 for child in token.children:
-                    if child.dep_ in ["prep", "adp"] and child.text.lower() != expected_
-                    
+                    if child.dep_ in ["prep", "adp"] and child.text.lower() != expected_prep:
+                        report.diagnostics.append(DiagnosticError(
+                            category="Lexicosyntactic Collocation",
+                            error_type="Erroneous Prepositional Selection",
+                            token_focus=f"{token.text} + {child.
