@@ -1,20 +1,15 @@
 import streamlit as st
 import spacy
-import spacy.cli
 from pydantic import BaseModel
 from typing import List, Optional
 
 # Sayfa yapılandırması
 st.set_page_config(page_title="LinguaOrder AI", page_icon="🍦", layout="wide")
 
-# Dil modelini yükleyen ve eksikse doğrudan ortama kuran fonksiyon
+# Dil modelini yükleme (requirements.txt ile önceden kurulmuş olacak)
 @st.cache_resource
 def load_nlp():
-    try:
-        return spacy.load("en_core_web_sm")
-    except OSError:
-        spacy.cli.download("en_core_web_sm")
-        return spacy.load("en_core_web_sm")
+    return spacy.load("en_core_web_sm")
 
 nlp = load_nlp()
 
