@@ -102,13 +102,18 @@ VERB_PREP_COLLOCATIONS = {
     "interested": "in",
     "good": "at",
     "wait": "for",
-    "graduate": "from"
+    "graduate": "from",
+    "agree": "with",
+    "consist": "of"
 }
 
 PAST_TIME_ADVERBIALS = [
     "yesterday", "ago", "last", "formerly", "previously",
-    "in 2020", "in 2021", "in 2022"
+    "in 2020", "in 2021", "in 2022", "in 2023", "in 2024"
 ]
+
+PLURAL_DETERMINERS = ["these", "those", "many", "several", "few"]
+SINGULAR_DETERMINERS = ["this", "that", "each", "every", "a", "an"]
 
 def diagnose_l2_syntax(text: str):
     start_time = time.perf_counter()
@@ -116,13 +121,13 @@ def diagnose_l2_syntax(text: str):
     report = SyntaxDiagnosticReport(raw_utterance=text, status="GRAMMATICAL")
     trace = report.execution_trace
 
-    trace.append(f"Tokenized utterance into {len(doc)} tokens.")
+    trace.append(f"Segmented utterance into {len(doc)} tokens.")
 
-    # 1. Özne-Yüklem Uyuşmazlığı (Subject-Verb Agreement)
+    # 1. Subject-Verb Agreement (SVA)
     for token in doc:
         if token.dep_ == "nsubj" and token.head.pos_ in ["VERB", "AUX"]:
             verb = token.head
-            trace.append(f"Checking nsubj('{token.text}') -> head('{verb.text}')")
+            trace.append(f"Checking agreement: nsubj('{token.text}') -> head('{verb.text}')")
             is_3sg = (
                 token.lower_ in ["he", "she", "it"] or 
                 (token.tag_ in ["NN", "NNP"] and token.text.lower() not in ["i", "you"])
@@ -137,7 +142,7 @@ def diagnose_l2_syntax(text: str):
                 ))
                 trace.append("Violation: SVA clash between 3sg subject and uninflected verb.")
 
-    # 2. Yanlış Edat Seçimi (Prepositional Collocation)
+    # 2. Prepositional Collocations
     for token in doc:
         if token.pos_ in ["VERB", "ADJ"]:
             lemma = token.lemma_.lower()
@@ -152,9 +157,9 @@ def diagnose_l2_syntax(text: str):
                             suggested_correction=token.text + " " + target_prep,
                             linguistic_rule=f"Predicate '{lemma}' selects preposition '{target_prep}' via complementation."
                         ))
-                        trace.append(f"Violation: '{lemma}' paired with '{child.text}' instead of '{target_prep}'.")
+                        trace.append(f"Violation: '{lemma}' subcategorized with '{child.text}' instead of '{target_prep}'.")
 
-    # 3. Zaman Zarfı & Zaman Uyuşmazlığı (Tense-Aspect Clash)
+    # 3. Tense-Aspect Concordance
     past_anchor = None
     for token in doc:
         if token.dep_ in ["advmod", "pobj", "npadvmod"]:
@@ -170,11 +175,11 @@ def diagnose_l2_syntax(text: str):
                     error_type="Tense-Aspect Clash",
                     token_focus=token.text + " ... " + past_anchor,
                     suggested_correction="Inflect '" + token.text + "' into past tense (VBD)",
-                    linguistic_rule=f"Past temporal deictic anchor '{past_anchor}' requires simple past morphology."
+                    linguistic_rule=f"Past deictic anchor '{past_anchor}' requires simple past morphology."
                 ))
                 trace.append(f"Violation: Present verb '{token.text}' clashed with past anchor '{past_anchor}'.")
 
-    # 4. Çifte Çekimleme (Double Marking / Do-Support)
+    # 4. Double Marking / Auxiliary Complementation
     for token in doc:
         if token.dep_ == "aux" and token.lemma_ == "do":
             main_verb = token.head
@@ -187,6 +192,65 @@ def diagnose_l2_syntax(text: str):
                     linguistic_rule="Do-support absorbs inflection; lexical verb must be bare infinitive (VB)."
                 ))
                 trace.append("Violation: Double marking detected on both auxiliary and main verb.")
+
+    # 5. Determiner-Noun Number Concordance (NP Agreement)
+    for token in doc:
+        if token.dep_ == "det":
+            det_text = token.text.lower()
+            head_noun = token.head
+            if head_noun.pos_ == "NOUN":
+                if det_text in PLURAL_DETERMINERS and head_noun.tag_ == "NN":
+                    report.diagnostics.append(DiagnosticError(
+                        category="NP Morphosyntax",
+                        error_type="Determiner-Noun Number Mismatch",
+                        token_focus=token.text + " + " + head_noun.text,
+                        suggested_correction=token.text + " " + head_noun.lemma_ + "s",
+                        linguistic_rule=f"Plural determiner '{det_text}' requires plural head noun morphology (NNS)."
+                    ))
+                    trace.append("Violation: Plural determiner attached to singular count noun.")
+                elif det_text in ["these", "those"] and head_noun.tag_ == "NN":
+                    report.diagnostics.append(DiagnosticError(
+                        category="NP Morphosyntax",
+                        error_type="Demonstrative Concord Clash",
+                        token_focus=token.text + " + " + head_noun.text,
+                        suggested_correction="this/that " + head_noun.text,
+                        linguistic_rule="Proximal/distal plural demonstratives require plural head complement."
+                    ))
+
+    # 6. Non-Standard Double Negation
+    neg_tokens = [t for t in doc if t.dep_ == "neg" or t.text.lower() in ["no", "never", "not", "n't"]]
+    if len(neg_tokens) > 1:
+        focus = " ... ".join([t.text for t in neg_tokens])
+        report.diagnostics.append(DiagnosticError(
+            category="Negative Polarity",
+            error_type="Non-Standard Double Negation",
+            token_focus=focus,
+            suggested_correction="Use single negation with standard negative polarity item (e.g., anything / anybody)",
+            linguistic_rule="Standard English syntax enforces single clausal negation or NPI licensing."
+        ))
+        trace.append("Violation: Multiple negative operators detected within local clausal scope.")
+
+    # 7. Modal Auxiliary Complementation (can to go / must goes)
+    for token in doc:
+        if token.pos_ == "AUX" and token.tag_ == "MD":
+            main_verb = token.head
+            for child in token.children:
+                if child.text.lower() == "to":
+                    report.diagnostics.append(DiagnosticError(
+                        category="Modal Syntax",
+                        error_type="Infinitival Marker with Modal",
+                        token_focus=token.text + " to " + main_verb.text,
+                        suggested_correction=token.text + " " + main_verb.text,
+                        linguistic_rule="Modal auxiliaries select bare infinitival complements without 'to'."
+                    ))
+            if main_verb.tag_ in ["VBZ", "VBD", "VBG"]:
+                report.diagnostics.append(DiagnosticError(
+                    category="Modal Syntax",
+                    error_type="Inflected Modal Complement",
+                    token_focus=token.text + " + " + main_verb.text,
+                    suggested_correction=token.text + " " + main_verb.lemma_,
+                    linguistic_rule="Modal auxiliaries strictly govern bare infinitive predicates (VB)."
+                ))
 
     report.error_count = len(report.diagnostics)
     if report.error_count > 0:
@@ -203,11 +267,14 @@ def diagnose_l2_syntax(text: str):
 # Sidebar
 with st.sidebar:
     st.markdown("### Grammar Rules Scope")
-    st.caption("Universal Dependencies L2 Diagnostic Engine")
-    st.markdown("- `SVA:` Subject-Verb Concord (`VBZ` vs `VBP`)")
-    st.markdown("- `Collocations:` Prepositional Verbs (`depend on`, `rely on`, etc.)")
-    st.markdown("- `Temporal:` Past Adverbial vs Present Verb Tense Clash")
-    st.markdown("- `Auxiliaries:` Do-Support & Bare Infinitive Complementation")
+    st.caption("Universal Dependencies L2 Diagnostic Engine v2.0")
+    st.markdown("- `SVA:` 3sg Concord (`VBZ` vs `VBP`)")
+    st.markdown("- `Collocations:` Prepositional Selection Frame")
+    st.markdown("- `Temporal:` Past Adverbial vs Present Verb Clash")
+    st.markdown("- `Auxiliaries:` Do-Support & Bare Infinitive")
+    st.markdown("- `NP Syntax:` Determiner-Head Number Agreement")
+    st.markdown("- `Polarity:` Double Negation Elimination")
+    st.markdown("- `Modals:` Bare Infinitival Complementation")
     st.markdown("---")
     st.markdown("**Test Corpora Presets**")
     test_corpora = {
@@ -215,6 +282,8 @@ with st.sidebar:
         "Erroneous Preposition Selection": "Many students depend of their family for tuition.",
         "Tense-Aspect Clash with Past Adverb": "She writes an academic essay yesterday.",
         "Double Marking Error (Auxiliary)": "The applicant does not has enough credits.",
+        "Determiner-Noun Number Clash": "These book contains fundamental computational theories.",
+        "Non-Standard Double Negation": "The student didn't write nothing during the lecture.",
         "Well-Formed Control Sentence": "The student depends on primary sources and wrote an essay yesterday."
     }
     selected_preset = st.selectbox("Select Test Utterance:", list(test_corpora.keys()))
