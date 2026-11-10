@@ -1,121 +1,272 @@
 import streamlit as st
 import spacy
-from pydantic import BaseModel
-from typing import List, Optional
+from spacy import displacy
+from pydantic import BaseModel, Field
+from typing import List, Optional, Dict
+import time
 
-# Sayfa yapılandırması
-st.set_page_config(page_title="LinguaOrder AI", page_icon="🍦", layout="wide")
+# --- SAYFA YAPILANDIRMASI & TEMA ---
+st.set_page_config(
+    page_title="LinguaOrder AI | Computational Linguistics Workbench",
+    page_icon="🧠",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
-# Dil modelini yükleme (requirements.txt ile önceden kurulmuş olacak)
+# Özel Arayüz Stili (Modern UI & Metrik Kartları)
+st.markdown("""
+<style>
+    .metric-card {
+        background-color: #f8f9fa;
+        border-radius: 8px;
+        padding: 12px 16px;
+        border-left: 4px solid #1E88E5;
+        margin-bottom: 10px;
+    }
+    .stCodeBlock {
+        border-radius: 8px;
+    }
+    .displacy-container {
+        overflow-x: auto;
+        padding: 15px;
+        background-color: #ffffff;
+        border-radius: 8px;
+        border: 1px solid #e0e0e0;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+# Dil Modelini Önbelleğe Alarak Yükleme
 @st.cache_resource
 def load_nlp():
     return spacy.load("en_core_web_sm")
 
 nlp = load_nlp()
 
-# Veri modelleri
+# --- VERİ YAPILANDIRMA MODELLERİ (PYDANTIC) ---
 class OrderItem(BaseModel):
     item: str
     quantity: int = 1
-    customization: Optional[str] = None
+    container: Optional[str] = None
+    modifiers: List[str] = Field(default_factory=list)
 
-class ParsedOrder(BaseModel):
-    raw_text: str
-    items: List[OrderItem] = []
-    missing_information: List[str] = []
+class DialogueState(BaseModel):
+    raw_utterance: str
+    intent: str = "ORDER"
+    items: List[OrderItem] = Field(default_factory=list)
+    negated_items: List[str] = Field(default_factory=list)
+    missing_slots: List[str] = Field(default_factory=list)
+    system_response: str = ""
     status: str = "PENDING"
 
-def extract_order_entities(user_text: str):
-    doc = nlp(user_text.lower())
-    parsed = ParsedOrder(raw_text=user_text)
-    
-    valid_flavors = ["vanilla", "chocolate", "strawberry", "mango"]
-    valid_containers = ["cone", "cup"]
-    word_to_num = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5}
-    
-    for token in doc:
-        if token.text in valid_flavors:
-            quantity = 1
-            customization = None
-            
-            # Sayı tespiti (çocuk ve üst düğümlerden)
-            candidate_tokens = list(token.children) + list(token.head.children)
-            for cand in candidate_tokens:
-                if cand.pos_ == "NUM" or cand.dep_ == "nummod":
-                    if cand.text.isdigit():
-                        quantity = int(cand.text)
-                    else:
-                        quantity = word_to_num.get(cand.text, 1)
-                    break
-            
-            # Kap / Külah tespiti
-            for container in valid_containers:
-                if container in user_text.lower():
-                    customization = container
-            
-            parsed.items.append(OrderItem(
-                item=token.text,
-                quantity=quantity,
-                customization=customization
-            ))
-            
-    if not parsed.items:
-        parsed.missing_information.append("flavor_selection")
-    else:
-        for item in parsed.items:
-            if not item.customization:
-                parsed.missing_information.append(f"container_type_for_{item.item}")
-                
-    if not parsed.missing_information:
-        parsed.status = "CONFIRMED"
-        
-    return parsed, doc
+# --- KURAL TABANLI SENTAKTİK DİLBİLİM MOTORU ---
+VALID_FLAVORS = {
+    "vanilla": ["vanilla"],
+    "chocolate": ["chocolate", "choco"],
+    "strawberry": ["strawberry", "berry"],
+    "mango": ["mango"],
+    "pistachio": ["pistachio"]
+}
+VALID_CONTAINERS = ["cone", "cup", "tub", "bowl"]
+NUMBER_MAP = {
+    "a": 1, "an": 1, "one": 1, "two": 2, "three": 3, 
+    "four": 4, "five": 5, "single": 1, "double": 2, "triple": 3
+}
 
-# --- STREAMLIT GÖRSEL ARAYÜZÜ ---
+def analyze_utterance(text: str, current_pending_item: Optional[OrderItem] = None) -> (DialogueState, any, float):
+    start_time = time.perf_counter()
+    doc = nlp(text)
+    state = DialogueState(raw_utterance=text)
+    
+    # Çok adımlı diyalog (Eksik parametre tamamlama modu)
+    if current_pending_item and not any(k in text.lower() for k in ["cancel", "reset", "stop"]):
+        for container in VALID_CONTAINERS:
+            if container in text.lower():
+                current_pending_item.container = container
+                state.items.append(current_pending_item)
+                state.status = "CONFIRMED"
+                state.system_response = f"Perfect! Added {current_pending_item.quantity} {current_pending_item.item} in a {container}."
+                latency = (time.perf_counter() - start_time) * 1000
+                return state, doc, latency
+
+    # 1. Kök Fiil ve Niyet Analizi
+    for token in doc:
+        if token.lemma_ in ["cancel", "nevermind", "stop"]:
+            state.intent = "CANCEL_ORDER"
+            state.status = "TERMINATED"
+            state.system_response = "Order processing cancelled."
+            latency = (time.perf_counter() - start_time) * 1000
+            return state, doc, latency
+
+    # 2. Sentaktik Bağımlılık & Slot-Filling
+    for token in doc:
+        # Menü öğesi eşleştirme
+        matched_flavor = None
+        for canonical, syns in VALID_FLAVORS.items():
+            if token.lemma_.lower() in syns or token.text.lower() in syns:
+                matched_flavor = canonical
+                break
+                
+        if matched_flavor:
+            # Olumsuzluk Kontrolü (Syntactic Negation: 'neg' dependency)
+            is_negated = False
+            head = token.head
+            # Doğrudan çocuğunda veya bağlı olduğu üst fiilde 'no/not' var mı?
+            for child in list(token.children) + list(head.children):
+                if child.dep_ == "neg" or child.text.lower() in ["no", "without", "don't", "dont"]:
+                    is_negated = True
+                    break
+                    
+            if is_negated:
+                state.negated_items.append(matched_flavor)
+                continue
+
+            # Miktar / Sayı Belirteci Tespiti (nummod veya amod)
+            quantity = 1
+            search_scope = list(token.children) + list(head.children)
+            for child in search_scope:
+                if child.dep_ in ["nummod", "quantmod", "det", "amod"]:
+                    if child.text.isdigit():
+                        quantity = int(child.text)
+                        break
+                    elif child.text.lower() in NUMBER_MAP:
+                        quantity = NUMBER_MAP[child.text.lower()]
+                        break
+
+            # Kap / Format Tespiti (Prepositional Objects: 'prep' -> 'pobj')
+            detected_container = None
+            for container in VALID_CONTAINERS:
+                if container in text.lower():
+                    detected_container = container
+                    break
+
+            order_item = OrderItem(
+                item=matched_flavor,
+                quantity=quantity,
+                container=detected_container
+            )
+            state.items.append(order_item)
+
+    # 3. Durum ve Eksik Slot Yönetimi
+    if not state.items and not state.negated_items:
+        state.status = "NO_INTENT_DETECTED"
+        state.system_response = "No menu items recognized. Please specify an available flavor (e.g., vanilla, chocolate, strawberry)."
+    else:
+        for it in state.items:
+            if not it.container:
+                state.missing_slots.append(f"container_for_{it.item}")
+                
+        if state.missing_slots:
+            state.status = "SLOT_FILLING_REQUIRED"
+            unspecified_items = [it.item for it in state.items if not it.container]
+            state.system_response = f"Would you like your {', '.join(unspecified_items)} in a cup or a cone?"
+        else:
+            state.status = "CONFIRMED"
+            summary = [f"{it.quantity}x {it.item} ({it.container})" for it in state.items]
+            state.system_response = f"Order successfully validated: {', '.join(summary)}."
+
+    latency = (time.perf_counter() - start_time) * 1000
+    return state, doc, latency
+
+
+# --- YAN PANEL (SIDEBAR) ---
+with st.sidebar:
+    st.title("⚙️ Engine Architecture")
+    st.markdown("**Rule-Grounded Syntactic Dialogue Agent**")
+    st.caption("Computational Linguistics Core v2.1")
+    
+    st.markdown("---")
+    st.subheader("📚 Lexical Domain")
+    st.markdown("- **Flavors:** `vanilla`, `chocolate`, `strawberry`, `mango`, `pistachio`")
+    st.markdown("- **Containers:** `cup`, `cone`, `tub`, `bowl`")
+    st.markdown("- **Numerical Quantifiers:** Words (`two`, `double`) & Digits (`2`)")
+    
+    st.markdown("---")
+    st.subheader("💡 Test Örnekleri")
+    test_presets = [
+        "I'd love two scoops of pistachio in a cup and one chocolate in a cone.",
+        "Can I get three vanilla scoops please?",
+        "I want a double chocolate in a bowl but no strawberry.",
+        "Cancel the order, please."
+    ]
+    selected_preset = st.selectbox("Hızlı Senaryo Seç:", ["-- Boş / Kendi Cümleni Yaz --"] + test_presets)
+
+# --- ANA EKRAN DÜZENİ ---
 st.title("🍦 LinguaOrder AI")
-st.markdown("**Rule-Grounded Conversational Agent & Syntactic Dependency Parser**")
-st.caption("Computational Linguistics & Language Engineering Portfolio Demo")
+st.markdown("#### **Computational Linguistics & Dependency-Grounded Dialogue Workbench**")
+st.markdown("An explicit rule-grounded NLP agent leveraging syntactic dependency trees (`spaCy`), strict schema validation (`Pydantic`), and finite-state slot-filling.")
 
 st.divider()
 
-col1, col2 = st.columns([1, 1])
+# Session State ile Çok Adımlı Konuşma Takibi
+if "pending_item" not in st.session_state:
+    st.session_state.pending_item = None
 
-with col1:
-    st.subheader("1. Doğal Dil Girdisi (Utterance Input)")
-    default_text = "I want two chocolate scoops in a cup please"
-    user_input = st.text_input("Müşterinin Sipariş Cümlesi:", value=default_text)
-    parse_button = st.button("Siparişi Çözümle (Parse)", type="primary")
+initial_text = selected_preset if selected_preset != "-- Boş / Kendi Cümleni Yaz --" else "I want two strawberry please"
+user_utterance = st.text_input("Girdi Cümlesi (Customer Natural Language Utterance):", value=initial_text)
 
-if user_input or parse_button:
-    result, doc = extract_order_entities(user_input)
+col_act1, col_act2 = st.columns([1, 5])
+with col_act1:
+    submit_btn = st.button("🚀 Parse & Execute", type="primary", use_container_width=True)
+with col_act2:
+    if st.session_state.pending_item:
+        st.info(f"⏳ **Açık Diyalog Durumu:** `{st.session_state.pending_item.item}` için kap/külah seçimi bekleniyor...")
+
+if user_utterance:
+    state, doc, latency = analyze_utterance(user_utterance, st.session_state.pending_item)
     
-    with col1:
-        st.subheader("2. Durum ve Eksik Bilgi Kontrolü")
-        if result.status == "CONFIRMED":
-            st.success(f"Durum: {result.status} (Sipariş Hazırlanmaya Uygun)")
+    # State güncelleme
+    if state.status == "SLOT_FILLING_REQUIRED":
+        st.session_state.pending_item = [it for it in state.items if not it.container][0]
+    elif state.status == "CONFIRMED":
+        st.session_state.pending_item = None
+
+    # 1. Mühendislik Metrikleri Şeridi
+    m1, m2, m3, m4 = st.columns(4)
+    with m1:
+        st.metric("Çözümleme Süresi (Latency)", f"{latency:.2f} ms")
+    with m2:
+        st.metric("Durum (Dialogue State)", state.status)
+    with m3:
+        st.metric("Geçerli Ürün Adedi", len(state.items))
+    with m4:
+        st.metric("Dışlanan (Negated) Öğe", len(state.negated_items))
+
+    st.markdown("---")
+
+    # 2. İki Sütunlu Detaylı İnceleme
+    col_left, col_right = st.columns([1, 1])
+
+    with col_left:
+        st.subheader("💬 Ajan Yanıtı & Durum")
+        if state.status == "CONFIRMED":
+            st.success(f"**Agent:** {state.system_response}")
+        elif state.status == "SLOT_FILLING_REQUIRED":
+            st.warning(f"**Agent:** {state.system_response}")
         else:
-            st.warning(f"Durum: {result.status} (Eksik Parametre Var)")
-            st.info(f"Tespit Edilen Eksikler: {', '.join(result.missing_information)}")
+            st.info(f"**Agent:** {state.system_response}")
 
-        st.subheader("3. Yapılandırılmış JSON Verisi (Backend Çıktısı)")
-        st.json(result.model_dump())
+        st.subheader("📦 Yapılandırılmış Durum Çıktısı (JSON)")
+        st.json(state.model_dump())
 
-    with col2:
-        st.subheader("4. Dilbilimsel Sentaktik Analiz (Token & POS)")
-        token_data = []
-        for token in doc:
-            token_data.append({
-                "Token": token.text,
-                "Lemma": token.lemma_,
-                "POS (Rol)": token.pos_,
-                "Dependency": token.dep_,
-                "Head Noun": token.head.text
-            })
-        st.dataframe(token_data, use_container_width=True)
+    with col_right:
+        st.subheader("🌲 Sentaktik Bağımlılık Ağacı (Visual Dependency Tree)")
+        # displacy SVG render
+        svg = displacy.render(doc, style="dep", options={"compact": True, "distance": 100})
+        st.markdown(f'<div class="displacy-container">{svg}</div>', unsafe_allow_html=True)
 
-        st.subheader("5. Tespit Edilen Varlıklar (Entities)")
-        if result.items:
-            for item in result.items:
-                st.markdown(f"- **Ürün:** `{item.item}` | **Adet:** `{item.quantity}` | **Format:** `{item.customization or 'Belirtilmedi'}`")
-        else:
-            st.write("Herhangi bir menü öğesi eşleşmedi.")
+    # 3. Dilbilimsel Token Analiz Tablosu (Tam Genişlik)
+    st.markdown("---")
+    st.subheader("🔍 Derin Dilbilimsel Sözcük İncelemesi (Token-Level Linguistic Features)")
+    token_records = []
+    for token in doc:
+        token_records.append({
+            "Token": token.text,
+            "Lemma": token.lemma_,
+            "POS (Part of Speech)": token.pos_,
+            "Fine-grained Tag": token.tag_,
+            "Syntactic Dependency": token.dep_,
+            "Head Token (Ebeveyn)": token.head.text,
+            "Children": [child.text for child in token.children]
+        })
+    st.dataframe(token_records, use_container_width=True)
